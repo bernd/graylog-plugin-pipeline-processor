@@ -16,6 +16,7 @@
  */
 package org.graylog.plugins.pipelineprocessor.ast;
 
+import com.codahale.metrics.Counter;
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.Sets;
 
@@ -24,24 +25,46 @@ import java.util.SortedSet;
 
 @AutoValue
 public abstract class Pipeline {
+    private volatile int hashCode = Integer.MIN_VALUE;
 
     @Nullable
     public abstract String id();
     public abstract String name();
     public abstract SortedSet<Stage> stages();
 
+    @Nullable
+    public abstract Counter executionCounter();
+
     public static Builder builder() {
         return new AutoValue_Pipeline.Builder();
     }
 
     public static Pipeline empty(String name) {
-        return builder().name(name).stages(Sets.<Stage>newTreeSet()).build();
+        return builder().name(name).stages(Sets.newTreeSet()).build();
     }
 
     public abstract Builder toBuilder();
 
     public Pipeline withId(String id) {
         return toBuilder().id(id).build();
+    }
+
+    @Override
+    public int hashCode() {
+        if (hashCode != Integer.MIN_VALUE) {
+            return hashCode;
+        }
+        int h = 1;
+        h *= 1000003;
+        h ^= (id() == null) ? 0 : this.id().hashCode();
+        h *= 1000003;
+        h ^= this.name().hashCode();
+        h *= 1000003;
+        h ^= this.stages().hashCode();
+        h *= 1000003;
+        h ^= (executionCounter() == null) ? 0 : this.executionCounter().hashCode();
+        hashCode = h;
+        return h;
     }
 
     @AutoValue.Builder
@@ -53,6 +76,8 @@ public abstract class Pipeline {
         public abstract Builder name(String name);
 
         public abstract Builder stages(SortedSet<Stage> stages);
+
+        public abstract Builder executionCounter(Counter executionCounter);
     }
 
     public String toString() {

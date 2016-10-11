@@ -16,25 +16,26 @@
  */
 package org.graylog.plugins.pipelineprocessor.ast;
 
+import com.codahale.metrics.Counter;
 import com.google.auto.value.AutoValue;
 
+import javax.annotation.Nullable;
 import java.util.List;
 
 @AutoValue
 public abstract class Stage implements Comparable<Stage> {
-    private List<Rule> rules;
-
     public abstract int stage();
     public abstract boolean matchAll();
     public abstract List<String> ruleReferences();
 
-    public List<Rule> getRules() {
-        return rules;
-    }
+    @Nullable
+    public abstract List<Rule> rules();
 
-    public void setRules(List<Rule> rules) {
-        this.rules = rules;
-    }
+    @Nullable
+    public abstract Pipeline pipeline();
+
+    @Nullable
+    public abstract Counter executionCounter();
 
     public static Builder builder() {
         return new AutoValue_Stage.Builder();
@@ -56,6 +57,12 @@ public abstract class Stage implements Comparable<Stage> {
         public abstract Builder matchAll(boolean mustMatchAll);
 
         public abstract Builder ruleReferences(List<String> ruleRefs);
+
+        public abstract Builder rules(List<Rule> resolvedRules);
+
+        public abstract Builder pipeline(Pipeline pipeline);
+
+        public abstract Builder executionCounter(Counter executionCounter);
     }
 
     public String toString() {

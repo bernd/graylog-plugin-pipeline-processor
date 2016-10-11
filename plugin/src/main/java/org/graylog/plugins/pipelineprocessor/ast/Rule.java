@@ -16,7 +16,12 @@
  */
 package org.graylog.plugins.pipelineprocessor.ast;
 
+import com.codahale.metrics.Counter;
+import com.codahale.metrics.Metric;
+import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.MetricSet;
 import com.google.auto.value.AutoValue;
+import com.google.common.collect.Maps;
 import org.antlr.v4.runtime.CommonToken;
 import org.graylog.plugins.pipelineprocessor.ast.expressions.BooleanExpression;
 import org.graylog.plugins.pipelineprocessor.ast.expressions.LogicalExpression;
@@ -25,9 +30,51 @@ import org.graylog.plugins.pipelineprocessor.ast.statements.Statement;
 import javax.annotation.Nullable;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Map;
 
 @AutoValue
 public abstract class Rule {
+
+    private Counter globalExecutionCounter;
+    private Counter globalFailedCounter;
+    private Counter globalMatchedCounter;
+    private Counter globalNotMatchedCounter;
+    private Counter localExecutionCounter;
+    private Counter localFailedCounter;
+    private Counter localMatchedCounter;
+    private Counter localNotMatchedCounter;
+
+    public Counter getGlobalExecutionCounter() {
+        return globalExecutionCounter;
+    }
+
+    public Counter getGlobalFailedCounter() {
+        return globalFailedCounter;
+    }
+
+    public Counter getGlobalMatchedCounter() {
+        return globalMatchedCounter;
+    }
+
+    public Counter getGlobalNotMatchedCounter() {
+        return globalNotMatchedCounter;
+    }
+
+    public Counter getLocalExecutionCounter() {
+        return localExecutionCounter;
+    }
+
+    public Counter getLocalFailedCounter() {
+        return localFailedCounter;
+    }
+
+    public Counter getLocalMatchedCounter() {
+        return localMatchedCounter;
+    }
+
+    public Counter getLocalNotMatchedCounter() {
+        return localNotMatchedCounter;
+    }
 
     @Nullable
     public abstract String id();
@@ -37,6 +84,9 @@ public abstract class Rule {
     public abstract LogicalExpression when();
 
     public abstract Collection<Statement> then();
+
+    @Nullable
+    public abstract Stage stage();
 
     public static Builder builder() {
         return new AutoValue_Rule.Builder();
@@ -51,6 +101,41 @@ public abstract class Rule {
     public static Rule alwaysFalse(String name) {
         return builder().name(name).when(new BooleanExpression(new CommonToken(-1), false)).then(Collections.emptyList()).build();
     }
+
+    public MetricSet metrics() {
+        localNotMatchedCounter = new Counter();
+        globalExecutionCounter = new Counter();
+        globalFailedCounter = new Counter();
+        globalMatchedCounter = new Counter();
+        globalNotMatchedCounter = new Counter();
+        localExecutionCounter = new Counter();
+        localFailedCounter = new Counter();
+        localMatchedCounter = new Counter();
+
+        return () -> {
+            final Map<String, Metric> metrics = Maps.newHashMap();
+            // overall counters per rule
+            metrics.put(MetricRegistry.name(Rule.class, id(), "executed"), globalExecutionCounter);
+            metrics.put(MetricRegistry.name(Rule.class, id(), "failed"), globalFailedCounter);
+            metrics.put(MetricRegistry.name(Rule.class, id(), "matched"), globalMatchedCounter);
+            metrics.put(MetricRegistry.name(Rule.class, id(), "not-matched"), globalNotMatchedCounter);
+
+            // counters per rule occurrence in pipelines, but only if we actually have them
+            final Stage stage = stage();
+            if (stage != null && stage.pipeline() != null) {
+                //noinspection ConstantConditions
+                final String pipelineId = stage.pipeline().id();
+                final String stageId = String.valueOf(stage.stage());
+                metrics.put(MetricRegistry.name(Rule.class, id(), pipelineId, stageId, "executed"), localExecutionCounter);
+                metrics.put(MetricRegistry.name(Rule.class, id(), pipelineId, stageId, "failed"), localFailedCounter);
+                metrics.put(MetricRegistry.name(Rule.class, id(), pipelineId, stageId, "matched"), localMatchedCounter);
+                metrics.put(MetricRegistry.name(Rule.class, id(), pipelineId, stageId, "not-matched"), localNotMatchedCounter);
+
+            }
+            return metrics;
+        };
+    }
+
     @AutoValue.Builder
     public abstract static class Builder {
 
@@ -58,6 +143,8 @@ public abstract class Rule {
         public abstract Builder name(String name);
         public abstract Builder when(LogicalExpression condition);
         public abstract Builder then(Collection<Statement> actions);
+
+        public abstract Builder stage(Stage stage);
 
         public abstract Rule build();
     }

@@ -16,6 +16,7 @@
  */
 package org.graylog.plugins.pipelineprocessor.processors;
 
+import com.codahale.metrics.Counter;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.HashMultimap;
@@ -53,17 +54,21 @@ import org.graylog2.plugin.messageprocessors.MessageProcessor;
 import org.graylog2.plugin.streams.Stream;
 import org.graylog2.shared.buffers.processors.ProcessBufferProcessor;
 import org.graylog2.shared.journal.Journal;
+import org.graylog2.shared.metrics.MetricUtils;
 import org.jooq.lambda.tuple.Tuple2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nonnull;
 import javax.inject.Inject;
 import javax.inject.Named;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -88,7 +93,8 @@ public class PipelineInterpreter implements MessageProcessor {
     private EventBus serverEventBus;
 
     private final AtomicReference<ImmutableMap<String, Pipeline>> currentPipelines = new AtomicReference<>(ImmutableMap.of());
-    private final AtomicReference<ImmutableSetMultimap<String, Pipeline>> streamPipelineConnections = new AtomicReference<>(ImmutableSetMultimap.of());
+    private final AtomicReference<ImmutableSetMultimap<String, Pipeline>> streamPipelineConnections = new AtomicReference<>(
+            ImmutableSetMultimap.of());
 
     @Inject
     public PipelineInterpreter(RuleService ruleService,
@@ -143,32 +149,13 @@ public class PipelineInterpreter implements MessageProcessor {
         for (PipelineDao pipelineDao : pipelineService.loadAll()) {
             Pipeline pipeline;
             try {
-                pipeline =  pipelineRuleParser.parsePipeline(pipelineDao.id(), pipelineDao.source());
+                pipeline = pipelineRuleParser.parsePipeline(pipelineDao.id(), pipelineDao.source());
             } catch (ParseException e) {
                 pipeline = Pipeline.empty("Failed to parse pipeline" + pipelineDao.id());
             }
-            pipelineIdMap.put(pipelineDao.id(), pipeline);
+            pipelineIdMap.put(pipelineDao.id(), resolvePipeline(pipeline, ruleNameMap));
         }
 
-        // resolve all rules in the stages
-        pipelineIdMap.values().stream()
-                .flatMap(pipeline -> {
-                    log.debug("Resolving pipeline {}", pipeline.name());
-                    return pipeline.stages().stream();
-                })
-                .forEach(stage -> {
-                    final List<Rule> resolvedRules = stage.ruleReferences().stream().
-                            map(ref -> {
-                                Rule rule = ruleNameMap.get(ref);
-                                if (rule == null) {
-                                    rule = Rule.alwaysFalse("Unresolved rule " + ref);
-                                }
-                                log.debug("Resolved rule `{}` to {}", ref, rule);
-                                return rule;
-                            })
-                            .collect(Collectors.toList());
-                    stage.setRules(resolvedRules);
-                });
         currentPipelines.set(ImmutableMap.copyOf(pipelineIdMap));
 
         // read all stream connections of those pipelines to allow processing messages through them
@@ -182,6 +169,51 @@ public class PipelineInterpreter implements MessageProcessor {
         streamPipelineConnections.set(ImmutableSetMultimap.copyOf(connections));
 
     }
+
+    @Nonnull
+    private Pipeline resolvePipeline(Pipeline pipeline, Map<String, Rule> ruleNameMap) {
+        log.debug("Resolving pipeline {}", pipeline.name());
+
+        // register counter
+        final Pipeline.Builder resolved = pipeline.toBuilder()
+                .executionCounter(metricRegistry.counter(name(Pipeline.class, pipeline.id(), "executed")));
+
+        SortedSet<Stage> resolvedStages = Sets.newTreeSet(Comparator.comparingInt(Stage::stage));
+
+        pipeline.stages().forEach(stage -> {
+            final List<Rule> resolvedRules = stage.ruleReferences().stream()
+                    .map(ref -> {
+                        Rule rule = ruleNameMap.get(ref);
+                        if (rule == null) {
+                            rule = Rule.alwaysFalse("Unresolved rule " + ref);
+                        }
+                        log.debug("Resolved rule `{}` to {}", ref, rule);
+                        // include back reference to stage
+                        final Rule resolvedRule = rule.toBuilder()
+                                .stage(stage)
+                                .build();
+                        MetricUtils.safelyRegisterAll(metricRegistry, resolvedRule.metrics());
+                        return resolvedRule;
+                    })
+                    .collect(Collectors.toList());
+
+            // include back reference to pipeline and create execution counter
+            final Counter stageExecutionCounter =
+                    metricRegistry.counter(name(Pipeline.class, pipeline.id(),
+                                                "stage", String.valueOf(stage.stage()),
+                                                "executed"));
+            resolvedStages.add(stage.toBuilder()
+                                       .executionCounter(stageExecutionCounter)
+                                       .rules(resolvedRules)
+                                       .pipeline(pipeline)
+                                       .build());
+        });
+        // update stage references
+        resolved.stages(resolvedStages);
+
+        return resolved.build();
+    }
+
 
     /**
      * @param messages messages to process
@@ -239,13 +271,16 @@ public class PipelineInterpreter implements MessageProcessor {
                             .filter(streamConnection::containsKey)
                             .collect(Collectors.toSet());
                     pipelinesToRun = ImmutableSet.copyOf(streamsIds.stream()
-                            .flatMap(streamId -> streamConnection.get(streamId).stream())
-                            .collect(Collectors.toSet()));
+                                                                 .flatMap(streamId -> streamConnection.get(streamId).stream())
+                                                                 .collect(Collectors.toSet()));
                     interpreterListener.processStreams(message, pipelinesToRun, streamsIds);
                     log.debug("[{}] running pipelines {} for streams {}", msgId, pipelinesToRun, streamsIds);
                 }
 
-                toProcess.addAll(processForPipelines(message, msgId, pipelinesToRun.stream().map(Pipeline::id).collect(Collectors.toSet()), interpreterListener));
+                toProcess.addAll(processForPipelines(message,
+                                                     msgId,
+                                                     pipelinesToRun.stream().map(Pipeline::id).collect(Collectors.toSet()),
+                                                     interpreterListener));
 
                 boolean addedStreams = false;
                 // 5. add each message-stream combination to the blacklist set
@@ -281,20 +316,27 @@ public class PipelineInterpreter implements MessageProcessor {
         return new MessageCollection(fullyProcessed);
     }
 
-    public List<Message> processForPipelines(Message message, String msgId, Set<String> pipelines, InterpreterListener interpreterListener) {
+    public List<Message> processForPipelines(Message message,
+                                             String msgId,
+                                             Set<String> pipelines,
+                                             InterpreterListener interpreterListener) {
         final ImmutableSet<Pipeline> pipelinesToRun = ImmutableSet.copyOf(pipelines
-                .stream()
-                .map(pipelineId -> this.currentPipelines.get().get(pipelineId))
-                .filter(pipeline -> pipeline != null)
-                .collect(Collectors.toSet()));
+                                                                                  .stream()
+                                                                                  .map(pipelineId -> this.currentPipelines.get().get(
+                                                                                          pipelineId))
+                                                                                  .filter(pipeline -> pipeline != null)
+                                                                                  .collect(Collectors.toSet()));
 
         return processForResolvedPipelines(message, msgId, pipelinesToRun, interpreterListener);
     }
 
-    public List<Message> processForResolvedPipelines(Message message, String msgId, Set<Pipeline> pipelines, InterpreterListener interpreterListener) {
+    public List<Message> processForResolvedPipelines(Message message,
+                                                     String msgId,
+                                                     Set<Pipeline> pipelines,
+                                                     InterpreterListener interpreterListener) {
         final List<Message> result = new ArrayList<>();
         // record execution of pipeline in metrics
-        pipelines.forEach(pipeline -> metricRegistry.counter(name(Pipeline.class, pipeline.id(), "executed")).inc());
+        pipelines.forEach(this::countPipelineExecution);
 
         final StageIterator stages = new StageIterator(pipelines);
         final Set<Pipeline> pipelinesToSkip = Sets.newHashSet();
@@ -308,24 +350,25 @@ public class PipelineInterpreter implements MessageProcessor {
                 final Pipeline pipeline = pair.v2();
                 if (pipelinesToSkip.contains(pipeline)) {
                     log.debug("[{}] previous stage result prevents further processing of pipeline `{}`",
-                             msgId,
-                             pipeline.name());
+                              msgId,
+                              pipeline.name());
                     continue;
                 }
-                metricRegistry.counter(name(Pipeline.class, pipeline.id(), "stage", String.valueOf(stage.stage()), "executed")).inc();
+                countStageExecution(pipeline, stage);
+
                 interpreterListener.enterStage(stage);
                 log.debug("[{}] evaluating rule conditions in stage {}: match {}",
-                         msgId,
-                         stage.stage(),
-                         stage.matchAll() ? "all" : "either");
+                          msgId,
+                          stage.stage(),
+                          stage.matchAll() ? "all" : "either");
 
                 // TODO the message should be decorated to allow layering changes and isolate stages
                 final EvaluationContext context = new EvaluationContext(message);
 
                 // 3. iterate over all the stages in these pipelines and execute them in order
-                final ArrayList<Rule> rulesToRun = Lists.newArrayListWithCapacity(stage.getRules().size());
+                final ArrayList<Rule> rulesToRun = Lists.newArrayListWithCapacity(stage.rules().size());
                 boolean anyRulesMatched = false;
-                for (Rule rule : stage.getRules()) {
+                for (Rule rule : stage.rules()) {
                     interpreterListener.evaluateRule(rule, pipeline);
                     if (rule.when().evaluateBool(context)) {
                         anyRulesMatched = true;
@@ -372,11 +415,11 @@ public class PipelineInterpreter implements MessageProcessor {
                 // OR
                 // any rule could match, but at least one had to,
                 // record that it is ok to proceed with the pipeline
-                if ((stage.matchAll() && (rulesToRun.size() == stage.getRules().size()))
+                if ((stage.matchAll() && (rulesToRun.size() == stage.rules().size()))
                         || (rulesToRun.size() > 0 && anyRulesMatched)) {
                     interpreterListener.continuePipelineExecution(pipeline, stage);
                     log.debug("[{}] stage {} for pipeline `{}` required match: {}, ok to proceed with next stage",
-                             msgId, stage.stage(), pipeline.name(), stage.matchAll() ? "all" : "either");
+                              msgId, stage.stage(), pipeline.name(), stage.matchAll() ? "all" : "either");
                 } else {
                     // no longer execute stages from this pipeline, the guard prevents it
                     interpreterListener.stopPipelineExecution(pipeline, stage);
@@ -399,9 +442,41 @@ public class PipelineInterpreter implements MessageProcessor {
         return result;
     }
 
+    private void countStageExecution(Pipeline pipeline, Stage stage) {
+        stage.executionCounter().inc();
+//        metricRegistry.counter(name(Pipeline.class,
+//                                    pipeline.id(),
+//                                    "stage",
+//                                    String.valueOf(stage.stage()),
+//                                    "executed")).inc();
+    }
+
+    private void countPipelineExecution(Pipeline pipeline) {
+//        metricRegistry.counter(name(Pipeline.class, pipeline.id(), "executed")).inc();
+        pipeline.executionCounter().inc();
+    }
+
     private void countRuleExecution(Rule rule, Pipeline pipeline, Stage stage, String type) {
-        metricRegistry.counter(name(Rule.class, rule.id(), type)).inc();
-        metricRegistry.counter(name(Rule.class, rule.id(), pipeline.id(), String.valueOf(stage.stage()), type)).inc();
+        switch (type) {
+            case "executed":
+                rule.getGlobalExecutionCounter().inc();
+                rule.getLocalExecutionCounter().inc();
+                break;
+            case "failed":
+                rule.getGlobalFailedCounter().inc();
+                rule.getLocalFailedCounter().inc();
+                break;
+            case "matched":
+                rule.getGlobalMatchedCounter().inc();
+                rule.getLocalMatchedCounter().inc();
+                break;
+            case "not-matched":
+                rule.getGlobalNotMatchedCounter().inc();
+                rule.getLocalNotMatchedCounter().inc();
+                break;
+        }
+//        metricRegistry.counter(name(Rule.class, rule.id(), type)).inc();
+//        metricRegistry.counter(name(Rule.class, rule.id(), pipeline.id(), String.valueOf(stage.stage()), type)).inc();
     }
 
     private void appendProcessingError(Rule rule, Message message, String errorString) {
@@ -422,7 +497,7 @@ public class PipelineInterpreter implements MessageProcessor {
         event.updatedRuleIds().forEach(id -> {
             log.debug("Refreshing rule {}", id);
         });
-        scheduler.schedule((Runnable) this::reload, 0, TimeUnit.SECONDS);
+        scheduler.schedule(this::reload, 0, TimeUnit.SECONDS);
     }
 
     @Subscribe
@@ -434,13 +509,13 @@ public class PipelineInterpreter implements MessageProcessor {
         event.updatedPipelineIds().forEach(id -> {
             log.debug("Refreshing pipeline {}", id);
         });
-        scheduler.schedule((Runnable) this::reload, 0, TimeUnit.SECONDS);
+        scheduler.schedule(this::reload, 0, TimeUnit.SECONDS);
     }
 
     @Subscribe
     public void handlePipelineConnectionChanges(PipelineConnectionsChangedEvent event) {
         log.debug("Pipeline stream connection changed: {}", event);
-        scheduler.schedule((Runnable) this::reload, 0, TimeUnit.SECONDS);
+        scheduler.schedule(this::reload, 0, TimeUnit.SECONDS);
     }
 
     public static class Descriptor implements MessageProcessor.Descriptor {
