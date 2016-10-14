@@ -27,9 +27,9 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git@github.com:Graylog2/graylog-plugin-pipeline-processor.git</connection>
-        <developerConnection>scm:git:git@github.com:Graylog2/graylog-plugin-pipeline-processor.git</developerConnection>
-        <url>https://github.com/Graylog2/graylog-plugin-pipeline-processor</url>
+        <connection>scm:git:git@github.com:bernd/graylog-plugin-pipeline-processor.git</connection>
+        <developerConnection>scm:git:git@github.com:bernd/graylog-plugin-pipeline-processor.git</developerConnection>
+        <url>https://github.com/bernd/graylog-plugin-pipeline-processor</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -40,7 +40,7 @@
         <maven.compiler.target>1.8</maven.compiler.target>
         <maven.compiler.useIncrementalCompilation>false</maven.compiler.useIncrementalCompilation>
         <maven.install.skip>true</maven.install.skip>
-        <maven.deploy.skip>true</maven.deploy.skip>
+        <maven.deploy.skip>false</maven.deploy.skip>
         <maven.site.skip>true</maven.site.skip>
         <graylog.version>2.2.0-alpha.2-SNAPSHOT</graylog.version>
         <graylog.plugin-dir>/usr/share/graylog-server/plugin</graylog.plugin-dir>
@@ -51,6 +51,11 @@
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>org.graylog.plugins</groupId>
+                <artifactId>graylog-plugin-map-widget</artifactId>
+                <version>2.2.0-alpha.2-SNAPSHOT</version>
+            </dependency>
             <dependency>
                 <groupId>org.antlr</groupId>
                 <artifactId>antlr4-runtime</artifactId>

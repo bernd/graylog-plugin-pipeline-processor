@@ -12,6 +12,7 @@
         <relativePath>../graylog2-server/graylog-plugin-parent/graylog-plugin-web-parent</relativePath>
     </parent>
 
+    <groupId>org.graylog.plugins</groupId>
     <artifactId>graylog-plugin-pipeline-processor-parent</artifactId>
     <version>2.2.0-alpha.2-SNAPSHOT</version>
     <packaging>pom</packaging>
@@ -32,24 +33,24 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git@github.com:Graylog2/graylog-plugin-pipeline-processor.git</connection>
-        <developerConnection>scm:git:git@github.com:Graylog2/graylog-plugin-pipeline-processor.git</developerConnection>
-        <url>https://github.com/Graylog2/graylog-plugin-pipeline-processor</url>
+        <connection>scm:git:git@github.com:bernd/graylog-plugin-pipeline-processor.git</connection>
+        <developerConnection>scm:git:git@github.com:bernd/graylog-plugin-pipeline-processor.git</developerConnection>
+        <url>https://github.com/bernd/graylog-plugin-pipeline-processor</url>
         <tag>HEAD</tag>
     </scm>
 
     <distributionManagement>
         <snapshotRepository>
-            <id>sonatype-nexus-snapshots</id>
+            <id>sonatype-test-snapshots</id>
             <name>Sonatype Nexus Snapshots</name>
-            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
+            <url>http://localhost:8081/repository/graylog-project-test-snapshots/</url>
         </snapshotRepository>
         <repository>
-            <id>sonatype-nexus-staging</id>
+            <id>sonatype-test</id>
             <name>Nexus Release Repository</name>
-            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+            <url>http://localhost:8081/repository/graylog-project-test/</url>
         </repository>
-		</distributionManagement>
+    </distributionManagement>
 
     <build>
         <plugins>
